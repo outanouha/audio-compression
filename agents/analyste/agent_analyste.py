@@ -1,6 +1,7 @@
 import librosa
 import numpy as np
 import os
+import soundfile as sf  # Pour lire les métadonnées (nombre de canaux)
 
 class AnalyzerAgent:
     """
@@ -15,7 +16,16 @@ class AnalyzerAgent:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Fichier introuvable : {file_path}")
 
-        # Charger l'audio
+        # Récupérer le nombre de canaux avec soundfile (sans charger tout l'audio)
+        try:
+            info = sf.info(file_path)
+            channels = info.channels
+        except:
+            # Fallback : charger avec librosa pour avoir une estimation
+            y_test, sr_test = librosa.load(file_path, sr=None, mono=False)
+            channels = y_test.shape[0] if len(y_test.shape) > 1 else 1
+        
+        # Charger l'audio en mono pour l'analyse spectrale
         y, sr = librosa.load(file_path, sr=None, mono=True)
 
         # --- Métadonnées de base ---
@@ -70,6 +80,7 @@ class AnalyzerAgent:
             "file_size_mb": round(file_size_mb, 3),
             "duration_seconds": round(duration, 2),
             "sample_rate_hz": sr,
+            "channels": channels,  # ✅ AJOUT : nombre de canaux (1 = mono, 2 = stéréo)
             "zero_crossing_rate": round(zcr, 5),
             "rms_energy": round(rms, 5),
             "tempo_bpm": round(tempo, 1),
@@ -82,5 +93,5 @@ class AnalyzerAgent:
         }
 
         print(f"[AnalyzerAgent] Analyse terminee : {content_hint} "
-              f"({duration:.1f}s, {file_size_mb:.2f}MB)")
+              f"({duration:.1f}s, {file_size_mb:.2f}MB, {channels} canaux)")
         return result
