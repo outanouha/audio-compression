@@ -11,7 +11,7 @@ from agents.evaluateur.metrics import (
     charger_et_aligner
 )
 
-class EvaluatorAgent:
+class EvaluatorAgent:  # ✅ Nom correct
     """
     Agent 4 : Évalue la qualité de compression audio
     Entrée  : chemins original et compressé
@@ -56,7 +56,7 @@ class EvaluatorAgent:
                 "psnr": val_psnr,
                 "mse": round(val_mse, 6),
                 "taille_originale_ko": round(taille_o, 2),
-                "taille_compressee_ko": round(taille_c, 2),
+                "taille_compressée_ko": round(taille_c, 2),
                 "qualite": interp["qualite"],
                 "niveau": interp["niveau"],
                 "commentaire": interp["commentaire"],
