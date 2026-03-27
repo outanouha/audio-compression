@@ -1,5 +1,5 @@
 # metrics.py
-# Module des métriques pour l'agent évaluateur
+# Module des métriques pour l'agent évaluateur - Version finale
 
 import numpy as np
 import librosa
@@ -52,10 +52,12 @@ def snr(original, valeur_mse):
 # 4. PSNR - RAPPORT SIGNAL/BRUIT DE CRÊTE
 # ============================================================
 
-def psnr(valeur_mse, max_val=32767):
+def psnr(valeur_mse, max_val=1.0):
     """
     Calcule le rapport signal sur bruit de crête (Peak SNR)
     Formule : PSNR = 10 × log10(max² / MSE)
+    
+    Note: max_val = 1.0 car librosa retourne des signaux entre -1 et 1
     """
     if valeur_mse == 0:
         return 100.0
@@ -63,61 +65,95 @@ def psnr(valeur_mse, max_val=32767):
 
 
 # ============================================================
-# 5. INTERPRÉTATION OPTIMALE (PSNR + SNR + Taux)
+# 5. CHARGEMENT ET ALIGNEMENT
 # ============================================================
 
-def interpretation_optimale(taux, snr, psnr):
+def charger_et_aligner(original_path, compressed_path, target_sr=None):
+    """
+    Charge deux fichiers audio et les aligne à la même longueur et fréquence.
+    Si les fréquences d'échantillonnage sont différentes, resample automatiquement.
+    """
+    
+    # Charger les fichiers avec leur fréquence native
+    y_orig, sr_orig = librosa.load(original_path, sr=None)
+    y_comp, sr_comp = librosa.load(compressed_path, sr=None)
+    
+    # Vérifier si les fréquences sont différentes
+    if sr_orig != sr_comp:
+        print(f"[metrics] Fréquences différentes: {sr_orig}Hz vs {sr_comp}Hz")
+        
+        if target_sr is None:
+            target_sr = max(sr_orig, sr_comp)
+        
+        print(f"[metrics] Resampling vers {target_sr}Hz")
+        
+        if sr_orig != target_sr:
+            y_orig = librosa.resample(y_orig, orig_sr=sr_orig, target_sr=target_sr)
+        if sr_comp != target_sr:
+            y_comp = librosa.resample(y_comp, orig_sr=sr_comp, target_sr=target_sr)
+    
+    # Aligner les longueurs
+    min_len = min(len(y_orig), len(y_comp))
+    y_orig = y_orig[:min_len]
+    y_comp = y_comp[:min_len]
+    
+    return y_orig, y_comp
+
+
+# ============================================================
+# 6. INTERPRÉTATION OPTIMALE (basée sur SNR)
+# ============================================================
+
+def interpretation_optimale(taux, val_snr, val_psnr):
     """
     Interprétation combinée des 3 métriques
-    Retourne analyse détaillée pour l'interface
-    
-    Niveaux de qualité:
-    - 5: Excellente (PSNR ≥ 40, SNR ≥ 35)
-    - 4: Très bonne (PSNR 35-40, SNR 30-35)
-    - 3: Bonne (PSNR 30-35, SNR 25-30)
-    - 2: Moyenne (PSNR 25-30, SNR 20-25)
-    - 1: Passable (PSNR 20-25, SNR 15-20)
-    - 0: Mauvaise (PSNR < 20, SNR < 15)
+    Priorité au SNR pour la qualité perçue
     """
     
-    # 1. ÉVALUATION DE LA QUALITÉ
-    if psnr >= 40 and snr >= 35:
-        qualite = "Excellente"
-        niveau = 5
-        commentaire = "Qualité parfaite, aucune perte perceptible"
-        recommandation = "Compression idéale pour l'archivage et la production musicale"
+    # ============================================================
+    # 1. ÉVALUATION DE LA QUALITÉ (basée sur SNR)
+    # ============================================================
+    
+    if val_snr < 15:
+        qualite = "Mauvaise"
+        niveau = 0
+        commentaire = "Qualité médiocre, compression trop agressive"
+        recommandation = "Augmenter le bitrate ou changer de codec"
         
-    elif psnr >= 35 and snr >= 30:
-        qualite = "Très bonne"
-        niveau = 4
-        commentaire = "Perte à peine perceptible, excellente fidélité"
-        recommandation = "Parfait pour écoute sur équipement haut de gamme"
-        
-    elif psnr >= 30 and snr >= 25:
-        qualite = "Bonne"
-        niveau = 3
-        commentaire = "Qualité acceptable, perte non perceptible sur équipement standard"
-        recommandation = "Idéal pour diffusion web, streaming et usage mobile"
-        
-    elif psnr >= 25 and snr >= 20:
-        qualite = "Moyenne"
-        niveau = 2
-        commentaire = "Perte audible sur équipement haute fidélité"
-        recommandation = "Acceptable pour podcasts, audiobooks et contenus parlés"
-        
-    elif psnr >= 20 and snr >= 15:
+    elif val_snr < 20:
         qualite = "Passable"
         niveau = 1
         commentaire = "Perte nettement audible, son dégradé"
         recommandation = "Limite acceptable pour stockage de masse"
         
+    elif val_snr < 25:
+        qualite = "Moyenne"
+        niveau = 2
+        commentaire = "Perte audible sur équipement haute fidélité"
+        recommandation = "Acceptable pour podcasts, audiobooks"
+        
+    elif val_snr < 30:
+        qualite = "Bonne"
+        niveau = 3
+        commentaire = "Qualité acceptable, perte non perceptible sur équipement standard"
+        recommandation = "Idéal pour diffusion web, streaming et usage mobile"
+        
+    elif val_snr < 35:
+        qualite = "Très bonne"
+        niveau = 4
+        commentaire = "Perte à peine perceptible, excellente fidélité"
+        recommandation = "Parfait pour écoute sur équipement haut de gamme"
+        
     else:
-        qualite = "Mauvaise"
-        niveau = 0
-        commentaire = "Qualité médiocre, compression trop agressive"
-        recommandation = "Augmenter le bitrate ou changer de codec"
+        qualite = "Excellente"
+        niveau = 5
+        commentaire = "Qualité parfaite, aucune perte perceptible"
+        recommandation = "Compression idéale pour l'archivage"
     
-    # 2. ÉVALUATION DE L'EFFICACITÉ
+    # ============================================================
+    # 2. ÉVALUATION DE L'EFFICACITÉ (taux de compression)
+    # ============================================================
+    
     if taux >= 90:
         efficacite = "Maximale"
         facteur = round(100/(100-taux), 1)
@@ -137,19 +173,22 @@ def interpretation_optimale(taux, snr, psnr):
         efficacite = "Faible"
         gain = f"Réduction de {taux}% : compression presque inexistante"
     
-    # 3. CONCLUSION FINALE
-    if (psnr >= 30 and taux >= 75) or (psnr >= 35 and taux >= 50):
-        conclusion = "Compression optimale - Excellent compromis taille/qualité"
-    elif psnr >= 25 and taux >= 80:
-        conclusion = "Compression agressive - Bon compromis pour stockage"
-    elif psnr >= 30 and taux < 50:
-        conclusion = "Compression légère - Priorité à la qualité"
-    elif psnr < 25 and taux > 85:
-        conclusion = "Compression trop agressive - Perte de qualité excessive"
-    elif psnr < 25:
-        conclusion = "Qualité insuffisante - À améliorer"
+    # ============================================================
+    # 3. CONCLUSION (basée sur le SNR)
+    # ============================================================
+    
+    if val_snr < 15:
+        conclusion = "Compression trop agressive - Qualité médiocre, à éviter"
+    elif val_snr < 20:
+        conclusion = "Compression agressive - Qualité passable, acceptable pour usage occasionnel"
+    elif val_snr < 25:
+        conclusion = "Compression acceptable - Qualité moyenne, convient pour contenus parlés"
+    elif val_snr < 30:
+        conclusion = "Bon compromis - Qualité bonne pour diffusion web"
+    elif val_snr < 35:
+        conclusion = "Très bon compromis - Qualité élevée, recommandée"
     else:
-        conclusion = "Compression acceptable - Convient pour l'usage visé"
+        conclusion = "Compression optimale - Qualité excellente, aucune perte perceptible"
     
     return {
         "qualite": qualite,
@@ -160,24 +199,3 @@ def interpretation_optimale(taux, snr, psnr):
         "gain": gain,
         "conclusion": conclusion
     }
-
-
-# ============================================================
-# 6. UTILITAIRE : CHARGEMENT ET ALIGNEMENT
-# ============================================================
-
-def charger_et_aligner(original_path, compressed_path):
-    """
-    Charge deux fichiers audio et les aligne à la même longueur
-    Nécessaire pour comparer des signaux de durées différentes
-    """
-    y_orig, sr_orig = librosa.load(original_path, sr=None)
-    y_comp, sr_comp = librosa.load(compressed_path, sr=None)
-    
-    min_len = min(len(y_orig), len(y_comp))
-    y_orig = y_orig[:min_len]
-    y_comp = y_comp[:min_len]
-    
-    return y_orig, y_comp
-
-
