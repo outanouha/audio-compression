@@ -1,3 +1,6 @@
+# agent_decisionnaire.py
+# Agent Décisionnaire - Version avec règles avancées
+
 from __future__ import annotations
 
 import json
@@ -5,70 +8,50 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional
 
 
+# ============================================================
+# STRUCTURES DE DONNÉES
+# ============================================================
+
 @dataclass(frozen=True)
 class AnalyseAudio:
     """
-    Structure de données minimale et flexible pour les caractéristiques audio
-    produites par analyse.py. Les champs inconnus sont conservés dans `extras`.
+    Structure de données pour les caractéristiques audio.
+    Compatible avec la sortie de l'Agent Analyseur.
     """
-
     duree_s: Optional[float] = None
     taux_echantillonnage_hz: Optional[int] = None
     canaux: Optional[int] = None
-
-    # Indices de contenu (optionnel, si analyse.py peut les fournir)
-    probabilite_parole: Optional[float] = None  # 0..1
-    probabilite_musique: Optional[float] = None  # 0..1
-
-    # Volume / dynamique (optionnel)
-    lufs_integre: Optional[float] = None
-    crete_vrai_dbfs: Optional[float] = None
-    facteur_crete_db: Optional[float] = None
-
-    # Indices d'encodage source (optionnel)
-    codec_source: Optional[str] = None
-    debit_source_kbps: Optional[int] = None
-
-    extras: Dict[str, Any] = field(default_factory=dict)
+    content_hint: Optional[str] = None
+    tempo_bpm: Optional[float] = None
+    amplitude_range: Optional[float] = None
+    spectral_centroid_hz: Optional[float] = None
+    spectral_entropy: Optional[float] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def depuis_dictionnaire(m: Dict[str, Any]) -> "AnalyseAudio":
-        connus = {}
-        extras = dict(m)
-        # Accepter les clés en anglais (rétrocompatibilité) ET en français
-        correspondance = {
-            "duration_s": "duree_s",
-            "duree_s": "duree_s",
-            "sample_rate_hz": "taux_echantillonnage_hz",
-            "taux_echantillonnage_hz": "taux_echantillonnage_hz",
-            "channels": "canaux",
-            "canaux": "canaux",
-            "speech_probability": "probabilite_parole",
-            "probabilite_parole": "probabilite_parole",
-            "music_probability": "probabilite_musique",
-            "probabilite_musique": "probabilite_musique",
-            "integrated_lufs": "lufs_integre",
-            "lufs_integre": "lufs_integre",
-            "true_peak_dbfs": "crete_vrai_dbfs",
-            "crete_vrai_dbfs": "crete_vrai_dbfs",
-            "crest_factor_db": "facteur_crete_db",
-            "facteur_crete_db": "facteur_crete_db",
-            "source_codec": "codec_source",
-            "codec_source": "codec_source",
-            "source_bitrate_kbps": "debit_source_kbps",
-            "debit_source_kbps": "debit_source_kbps",
-        }
-        for cle_json, cle_champ in correspondance.items():
-            if cle_json in extras:
-                connus[cle_champ] = extras.pop(cle_json)
-        return AnalyseAudio(**connus, extras=extras)
+        """Convertit le dictionnaire de l'Analyseur en objet AnalyseAudio"""
+        return AnalyseAudio(
+            duree_s=m.get("duration_seconds"),
+            taux_echantillonnage_hz=m.get("sample_rate_hz"),
+            canaux=m.get("channels"),
+            content_hint=m.get("content_hint"),
+            tempo_bpm=m.get("tempo_bpm"),
+            amplitude_range=m.get("amplitude_range"),
+            spectral_centroid_hz=m.get("spectral_centroid_hz"),
+            spectral_entropy=m.get("spectral_entropy"),
+            extra={k: v for k, v in m.items() 
+                   if k not in ["duration_seconds", "sample_rate_hz", "channels", 
+                                "content_hint", "tempo_bpm", "amplitude_range",
+                                "spectral_centroid_hz", "spectral_entropy"]}
+        )
 
 
 @dataclass(frozen=True)
 class DecisionCompression:
     codec: str
     debit_kbps: int
-    mode: str  # ex. "CBR" ou "VBR"
+    mode: str
     justification: str
     raisonnement: Dict[str, Any] = field(default_factory=dict)
 
@@ -76,273 +59,198 @@ class DecisionCompression:
         return json.dumps(asdict(self), ensure_ascii=False, indent=indentation)
 
 
-# Codecs sources considérés comme sans perte.
-_CODECS_SANS_PERTE = {
-    "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le",
-    "pcm_s16be", "pcm_s24be", "pcm_s32be", "pcm_f32be",
-    "wav", "flac", "alac", "aiff",
-}
-
-
-def _est_source_sans_perte(codec_source: Optional[str]) -> bool:
-    """Vérifie si le codec source est un format sans perte."""
-    if codec_source is None:
-        return False
-    return codec_source.lower() in _CODECS_SANS_PERTE
-
-
-def _classifier_contenu(
-    prob_parole: Optional[float], prob_musique: Optional[float]
-) -> str:
-    """Classifie le contenu : parole, musique, mixte ou inconnu."""
-    if prob_parole is None and prob_musique is None:
-        return "inconnu"
-    p = prob_parole or 0.0
-    m = prob_musique or 0.0
-    if p >= max(m, 0.5):
-        return "parole"
-    if m >= max(p, 0.5):
-        return "musique"
-    return "mixte"
-
+# ============================================================
+# FONCTION DE DÉCISION (AVEC RÈGLES FINES)
+# ============================================================
 
 def decider_compression(entree_analyse: Dict[str, Any] | AnalyseAudio) -> DecisionCompression:
     """
-    Agent de décision — choisit parmi 5 méthodes de compression :
-
-    • MP3        – Compression avec pertes, compatibilité universelle
-    • AAC        – Meilleure qualité que MP3 à débit égal
-    • Opus       – Format moderne, excellent pour la voix
-    • OGG Vorbis – Alternative libre au MP3
-    • FLAC       – Compression sans perte
-
-    La décision est basée sur les caractéristiques audio fournies.
+    Choisit le codec et le débit en fonction de l'analyse audio.
+    Utilise plusieurs critères : type de contenu, dynamique, tempo, complexité spectrale.
     """
-    analyse = (
-        entree_analyse
-        if isinstance(entree_analyse, AnalyseAudio)
-        else AnalyseAudio.depuis_dictionnaire(entree_analyse)
-    )
-
-    prob_parole = analyse.probabilite_parole
-    prob_musique = analyse.probabilite_musique
-    type_contenu = _classifier_contenu(prob_parole, prob_musique)
+    
+    # Convertir en objet AnalyseAudio si nécessaire
+    if isinstance(entree_analyse, dict):
+        analyse = AnalyseAudio.depuis_dictionnaire(entree_analyse)
+    else:
+        analyse = entree_analyse
+    
+    # Récupérer les informations clés
+    type_contenu = analyse.content_hint or "mixed"
     canaux = analyse.canaux or 2
-    crete = analyse.facteur_crete_db
-    debit_src = analyse.debit_source_kbps
-    taux_ech = analyse.taux_echantillonnage_hz or 44100
-    source_sans_perte = _est_source_sans_perte(analyse.codec_source)
-
-    # ── Arbre de décision ────────────────────────────────────────────
-    #
-    # 1. FLAC : source sans perte + audio riche en dynamique ou haute résolution
-    #    → Conserver la qualité originale intacte.
-    if source_sans_perte and (
-        (crete is not None and crete >= 14) or taux_ech >= 96000
-    ):
-        codec = "flac"
-        mode = "sans_perte"
-        debit = 0  # variable, déterminé par le contenu
-
-    # 2. Source déjà compressée à bas débit → MP3
-    #    Pas besoin d'un codec avancé, miser sur la compatibilité maximale.
-    elif not source_sans_perte and debit_src is not None and debit_src <= 128:
-        codec = "mp3"
-        mode = "CBR"
-        debit = min(debit_src, 128)
-
-    # 3. Parole → Opus
-    #    Le codec le plus efficace pour la voix, très bas débit possible.
-    elif type_contenu == "parole":
+    duree = analyse.duree_s or 0
+    tempo = analyse.tempo_bpm or 0
+    amplitude = analyse.amplitude_range or 0
+    spectral_centroid = analyse.spectral_centroid_hz or 0
+    entropie = analyse.spectral_entropy or 0
+    
+    # --- DÉTERMINATION DU CODEC ---
+    if type_contenu == "voice":
         codec = "opus"
         mode = "VBR"
-        debit = 32 if canaux == 1 else 64
-
-    # 4. Musique → AAC
-    #    Meilleure fidélité avec pertes que MP3, large compatibilité.
-    elif type_contenu == "musique":
+        debit_base = 32 if canaux == 1 else 64
+        justification_base = "Contenu vocal détecté. Opus offre la meilleure qualité à faible débit."
+        
+    elif type_contenu == "music":
         codec = "aac"
         mode = "VBR"
-        debit = 128 if canaux >= 2 else 96
-
-    # 5. Mixte → OGG Vorbis
-    #    Bon compromis libre entre parole et musique.
-    elif type_contenu == "mixte":
-        codec = "ogg_vorbis"
+        debit_base = 96 if canaux == 1 else 128
+        justification_base = "Contenu musical détecté. AAC offre une meilleure qualité que MP3."
+        
+    elif type_contenu == "ambient":
+        codec = "ogg"
         mode = "VBR"
-        debit = 112 if canaux >= 2 else 80
-
-    # 6. Inconnu → MP3
-    #    Compatibilité universelle comme choix sûr par défaut.
-    else:
+        debit_base = 64 if canaux == 1 else 96
+        justification_base = "Contenu ambiant détecté. OGG offre un bon compromis."
+        
+    else:  # mixed ou inconnu
         codec = "mp3"
-        mode = "VBR"
-        debit = 128 if canaux >= 2 else 64
-
-    # ── Ajustements post-décision (codecs avec pertes uniquement) ────
-    if mode != "sans_perte":
-        # Dynamique riche → augmenter le débit pour préserver les transitoires.
-        if crete is not None and crete >= 14:
-            debit = int(round(debit * 1.25))
-
-        # Éviter le surencodage : ne pas dépasser ~110 % du débit source.
-        if debit_src is not None:
-            debit = min(debit, max(32, int(round(debit_src * 1.1))))
-
-        # Bornes raisonnables.
-        debit = max(24, min(debit, 320))
-
-    justification = _construire_justification(
-        type_contenu=type_contenu,
-        codec=codec,
-        mode=mode,
-        debit=debit,
-        analyse=analyse,
-        source_sans_perte=source_sans_perte,
-    )
-
+        mode = "CBR"
+        debit_base = 128
+        justification_base = "Type mixte ou inconnu. MP3 choisi pour sa compatibilité universelle."
+    
+    # --- AJUSTEMENT DU DÉBIT (RÈGLES FINES) ---
+    debit = debit_base
+    justifications_ajustements = []
+    
+    # 1. Dynamique (amplitude_range élevée = grande dynamique)
+    if amplitude > 0.8:
+        debit = int(debit * 1.5)
+        justifications_ajustements.append("grande dynamique détectée")
+    elif amplitude > 0.6:
+        debit = int(debit * 1.25)
+        justifications_ajustements.append("dynamique modérée détectée")
+    
+    # 2. Tempo (musique rapide)
+    if type_contenu == "music" and tempo > 140:
+        debit = int(debit * 1.25)
+        justifications_ajustements.append("tempo rapide")
+    elif type_contenu == "music" and tempo < 70:
+        debit = int(debit * 0.9)
+        justifications_ajustements.append("tempo lent")
+    
+    # 3. Complexité spectrale (entropie élevée = contenu riche)
+    if entropie > 3.0:
+        debit = int(debit * 1.3)
+        justifications_ajustements.append("haute complexité spectrale")
+    elif entropie > 2.0:
+        debit = int(debit * 1.15)
+        justifications_ajustements.append("complexité spectrale modérée")
+    
+    # 4. Fréquences élevées (spectral centroid haut = contenu aigu riche)
+    if spectral_centroid > 5000:
+        debit = int(debit * 1.2)
+        justifications_ajustements.append("fréquences élevées présentes")
+    elif spectral_centroid > 3000:
+        debit = int(debit * 1.1)
+        justifications_ajustements.append("fréquences modérément élevées")
+    
+    # 5. Fichiers longs (réduction du débit)
+    if duree > 1800:  # plus de 30 minutes
+        debit = max(32, int(debit * 0.7))
+        justifications_ajustements.append("fichier long")
+    
+    # Bornes de sécurité
+    debit = max(24, min(debit, 320))
+    
+    # --- CONSTRUCTION DE LA JUSTIFICATION ---
+    justification = justification_base
+    if justifications_ajustements:
+        justification += f" Ajustements : {', '.join(justifications_ajustements)}. Débit final : {debit} kbps."
+    
+    # --- RAISONNEMENT DÉTAILLÉ ---
     raisonnement = {
-        "classe_contenu": type_contenu,
+        "type_contenu": type_contenu,
         "canaux": canaux,
-        "source_sans_perte": source_sans_perte,
-        "entrees_utilisees": {
-            "probabilite_parole": prob_parole,
-            "probabilite_musique": prob_musique,
-            "facteur_crete_db": crete,
-            "taux_echantillonnage_hz": taux_ech,
-            "debit_source_kbps": debit_src,
-            "codec_source": analyse.codec_source,
+        "duree_secondes": duree,
+        "codec_choisi": codec,
+        "debit_base_kbps": debit_base,
+        "debit_final_kbps": debit,
+        "mode": mode,
+        "metriques_utilisees": {
+            "amplitude_range": amplitude,
+            "tempo_bpm": tempo,
+            "spectral_centroid_hz": spectral_centroid,
+            "spectral_entropy": entropie
         },
+        "ajustements": justifications_ajustements
     }
-
+    
     return DecisionCompression(
         codec=codec,
         debit_kbps=debit,
         mode=mode,
         justification=justification,
-        raisonnement=raisonnement,
+        raisonnement=raisonnement
     )
 
 
-_NOMS_CODECS = {
-    "mp3": "MP3",
-    "aac": "AAC",
-    "opus": "Opus",
-    "ogg_vorbis": "OGG Vorbis",
-    "flac": "FLAC",
-}
+# ============================================================
+# CLASSE AGENT POUR L'ORCHESTRATEUR
+# ============================================================
 
-
-def _construire_justification(
-    *,
-    type_contenu: str,
-    codec: str,
-    mode: str,
-    debit: int,
-    analyse: AnalyseAudio,
-    source_sans_perte: bool,
-) -> str:
-    parties: list[str] = []
-    nom_codec = _NOMS_CODECS.get(codec, codec.upper())
-
-    # ── Raison principale du choix de codec ──
-    if codec == "flac":
-        parties.append(
-            "Source sans perte avec dynamique riche ou haute résolution détectée ; "
-            "FLAC choisi pour conserver la qualité originale intacte (compression sans perte)."
-        )
-    elif codec == "opus":
-        parties.append(
-            "Contenu à dominante parole détecté ; Opus sélectionné pour son excellente "
-            "efficacité vocale à bas débit (format moderne, optimal pour la voix)."
-        )
-    elif codec == "aac":
-        parties.append(
-            "Contenu à dominante musique détecté ; AAC sélectionné pour sa meilleure "
-            "qualité que MP3 à débit égal, avec une bonne compatibilité de lecture."
-        )
-    elif codec == "ogg_vorbis":
-        parties.append(
-            "Contenu mixte détecté ; OGG Vorbis sélectionné comme alternative libre "
-            "offrant un bon compromis entre qualité vocale et musicale."
-        )
-    elif codec == "mp3":
-        if not source_sans_perte and analyse.debit_source_kbps is not None and analyse.debit_source_kbps <= 128:
-            parties.append(
-                "Source déjà compressée à bas débit ; MP3 choisi pour sa compatibilité "
-                "universelle (inutile d'utiliser un codec avancé sur un signal déjà dégradé)."
-            )
-        else:
-            parties.append(
-                "Type de contenu inconnu ; MP3 choisi par défaut pour sa compatibilité "
-                "universelle (format le plus largement supporté)."
-            )
-
-    # ── Débit / mode ──
-    if mode == "sans_perte":
-        parties.append(f"{nom_codec} en mode sans perte (débit variable selon le contenu).")
-    else:
-        parties.append(f"{nom_codec} en {mode} à {debit} kbps.")
-
-    # ── Indices source ──
-    if analyse.codec_source or analyse.debit_source_kbps is not None:
-        src = []
-        if analyse.codec_source:
-            src.append(analyse.codec_source)
-        if analyse.debit_source_kbps is not None:
-            src.append(f"{analyse.debit_source_kbps} kbps")
-        parties.append(f"Source : {', '.join(src)}.")
-
-    # ── Dynamique ──
-    if analyse.facteur_crete_db is not None:
-        parties.append(
-            f"Facteur de crête {analyse.facteur_crete_db:.1f} dB "
-            f"pris en compte pour la complexité/dynamique."
-        )
-
-    return " ".join(parties)
-
-
-def charger_analyse_json(chemin: str) -> Dict[str, Any]:
-    with open(chemin, "r", encoding="utf-8") as f:
-        donnees = json.load(f)
-    if not isinstance(donnees, dict):
-        raise ValueError("Le fichier JSON d'analyse doit être un objet/dictionnaire")
-    return donnees
-
-
-def principal(argv: Optional[list[str]] = None) -> int:
-    import argparse
-
-    p = argparse.ArgumentParser(
-        description="Agent de décision : choisir codec/débit/mode à partir de la sortie d'analyse.py."
-    )
-    p.add_argument("--analyse-json", type=str, required=True, help="Chemin vers le JSON produit par analyse.py")
-    args = p.parse_args(argv)
-
-    analyse = charger_analyse_json(args.analyse_json)
-    decision = decider_compression(analyse)
-    print(decision.vers_json(indentation=2))
-    return 0
 class DecisionAgent:
     """
-    Agent décisionnaire - Interface pour l'orchestrateur
+    Agent Décisionnaire - Interface pour l'orchestrateur.
+    Compatible avec la sortie de l'Agent Analyseur.
     """
+    
     def decider(self, analyse):
-        # Convertir l'analyse si nécessaire
-        if isinstance(analyse, dict):
-            # Appeler la fonction existante
-            decision = decider_compression(analyse)
-        else:
-            # Si c'est un objet AnalyseAudio
-            decision = decider_compression(analyse)
+        """
+        Reçoit le dictionnaire de l'Analyseur et retourne les paramètres de compression.
+        """
+        decision = decider_compression(analyse)
         
-        # Retourner le format attendu par l'orchestrateur
         return {
             "codec": decision.codec,
             "bitrate": f"{decision.debit_kbps}k",
             "justification": decision.justification
         }
 
+
+# ============================================================
+# TEST
+# ============================================================
+
 if __name__ == "__main__":
-    raise SystemExit(principal())
+    # Test 1 : Musique dynamique et rapide
+    test_musique = {
+        "duration_seconds": 240,
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "content_hint": "music",
+        "tempo_bpm": 150,
+        "amplitude_range": 0.85,
+        "spectral_centroid_hz": 4800,
+        "spectral_entropy": 3.2
+    }
+    
+    # Test 2 : Voix longue
+    test_voix = {
+        "duration_seconds": 3600,
+        "sample_rate_hz": 22050,
+        "channels": 1,
+        "content_hint": "voice",
+        "tempo_bpm": 0,
+        "amplitude_range": 0.4,
+        "spectral_centroid_hz": 1800,
+        "spectral_entropy": 1.5
+    }
+    
+    agent = DecisionAgent()
+    
+    print("=" * 60)
+    print("TEST 1 : Musique dynamique et rapide")
+    print("=" * 60)
+    resultat1 = agent.decider(test_musique)
+    print(f"Codec   : {resultat1['codec']}")
+    print(f"Débit   : {resultat1['bitrate']}")
+    print(f"Justification : {resultat1['justification']}")
+    
+    print("\n" + "=" * 60)
+    print("TEST 2 : Voix longue")
+    print("=" * 60)
+    resultat2 = agent.decider(test_voix)
+    print(f"Codec   : {resultat2['codec']}")
+    print(f"Débit   : {resultat2['bitrate']}")
+    print(f"Justification : {resultat2['justification']}")
